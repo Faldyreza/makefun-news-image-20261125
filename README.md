@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/news-image-20261125/Faldyreza/makefun-news-image-20261125/rank.svg)](https://make.fun/bounty/news-image-20261125/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261125)
 [![reward](https://make.fun/badge/news-image-20261125/Faldyreza/makefun-news-image-20261125/reward.svg)](https://make.fun/bounty/news-image-20261125?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261125)
 
-One image summing up the world's news of Wednesday, 25 November 2026: the Cartagena hostage rescue, Pakistan's first astronaut reaching Tiangong, Bangladesh garment wages up 36%, the Pongkor mine flood, Ukraine's strike on Savasleyka air base, and the day's briefs.
+THE WORLD — a one-image newspaper front page summing up Wednesday, 25 November 2026: the Cartagena hostage rescue, the first Pakistani astronaut aboard Tiangong, Bangladesh's 36% garment wage rise, the Pongkor mine flood, Ukraine's strike on Savasleyka air base, and the day's briefs.
 
 ## Run it
 
