@@ -1,28 +1,24 @@
-// news-image-20261125 v6 — "THE WORLD — Wednesday, 25 November 2026"
-// Fresh build from DESIGN.md. Node 22 stdlib only, no network at run time.
-// Writes /output/entry.png (1024x1024, <=1 MiB) + /output/dossier.json, deterministic.
-//
-// Facts (all 25 Nov 2026, verified — sources in run-2026-11-26-v1.md):
-// LEAD Cartagena: security forces storm Exito supermarket at dawn; ~30 hostages freed,
-//   1 gunman killed, 4 held (AP, Colombia Reports, Reuters).
-// SPACE: Shenzhou-24 launches 08:18 Beijing, docks 11:56 at Tiangong; Muhammad Zeeshan Ali,
-//   first Pakistani astronaut, first foreign guest aboard (Nature, SpacePolicyOnline).
-// BANGLADESH: garment minimum wage +36% to 17,000 taka/month, wage board 4-2, from Dec 1
-//   (Reuters, TBS News).
-// INDONESIA: flood at unlicensed Pongkor gold mine, Bogor, shaft 100 m; 9 dead, 17 trapped
-//   (AP, Reuters).
-// EUROPE: Ukraine strikes Savasleyka air base, Russia; 5 jets damaged (3 MiG-31, 2 Su-34)
-//   (Reuters).
-// BRIEFS: Hodeidah (Saudi-led strikes; Houthis threaten Jeddah), Solomon Islands security
-//   pact with Australia (no foreign bases), Nvidia -8.3%, Chen Jining probed, Cessna crash
-//   in the Gulf kills six, Huawei guilty on 10 of 12 counts.
-// Hormuz (3 tankers) was the 24 Nov lead — NOT the lead today.
+// news-image-20261125 v7 — "THE WORLD — Wednesday, 25 November 2026"
+// Fresh build from DESIGN.md. Procedural newspaper front page.
+// Node 22 stdlib only, no network at run time, deterministic output.
+import * as fs from "node:fs";
+import * as zlib from "node:zlib";
+import * as crypto from "node:crypto";
+import * as path from "node:path";
 
-import { writeFileSync, mkdirSync } from 'node:fs';
-import { deflateSync } from 'node:zlib';
-import { createHash } from 'node:crypto';
+// ---------------- palette ----------------
+const INK = 0x1c1712;
+const PAPER = 0xf6f0e1;
+const CARD = 0xfffdf6;
+const ACCENT = 0xb3372a;
+const GOLD = 0xd9a441;
+const BAND = 0x14100c;
+const BRIEF = 0xf6f0e1;
+const SEPARATOR = 0x3a3226;
+const SKIN = 0xe8b88a;
+const PANTS = 0x2e2a26;
 
-// ---------------------------------------------------------------- CRC32 + PNG
+// ---------------- PNG encoder ----------------
 const CRC_TABLE: number[] = (() => {
   const t: number[] = [];
   for (let n = 0; n < 256; n++) {
@@ -39,10 +35,10 @@ function crc32(buf: Buffer): number {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-function chunk(type: string, data: Buffer): Buffer {
+function pngChunk(type: string, data: Buffer): Buffer {
   const len = Buffer.alloc(4);
   len.writeUInt32BE(data.length, 0);
-  const td = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+  const td = Buffer.concat([Buffer.from(type, "ascii"), data]);
   const crc = Buffer.alloc(4);
   crc.writeUInt32BE(crc32(td), 0);
   return Buffer.concat([len, td, crc]);
@@ -52,684 +48,560 @@ function encodePNG(w: number, h: number, rgb: Uint8Array): Buffer {
   const raw = Buffer.alloc(h * (1 + w * 3));
   for (let y = 0; y < h; y++) {
     raw[y * (1 + w * 3)] = 0;
-    Buffer.from(rgb.buffer, rgb.byteOffset + y * w * 3, w * 3).copy(raw, y * (1 + w * 3) + 1);
+    raw.set(rgb.subarray(y * w * 3, (y + 1) * w * 3), y * (1 + w * 3) + 1);
   }
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(w, 0);
   ihdr.writeUInt32BE(h, 4);
-  ihdr[8] = 8; // bit depth
-  ihdr[9] = 2; // RGB
+  ihdr[8] = 8;
+  ihdr[9] = 2;
   ihdr[10] = 0;
   ihdr[11] = 0;
   ihdr[12] = 0;
+  const idat = zlib.deflateSync(raw, { level: 9 });
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    chunk('IHDR', ihdr),
-    chunk('IDAT', deflateSync(raw)),
-    chunk('IEND', Buffer.alloc(0)),
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", idat),
+    pngChunk("IEND", Buffer.alloc(0)),
   ]);
 }
 
-// ---------------------------------------------------------------- raster
-const W = 1024;
-const H = 1024;
-const img = new Uint8Array(W * H * 3);
-
-type RGB = [number, number, number];
-const PAPER: RGB = [245, 240, 230];
-const INK: RGB = [20, 16, 12];
-const RED: RGB = [176, 30, 30];
-const GOLD: RGB = [196, 148, 44];
-const CARD: RGB = [252, 249, 242];
-const BRIEF_BG: RGB = [20, 16, 12];
-const BRIEF_TX: RGB = [238, 231, 214];
-
-function setPx(x: number, y: number, c: RGB): void {
-  if (x < 0 || y < 0 || x >= W || y >= H) return;
-  const i = (y * W + x) * 3;
-  img[i] = c[0];
-  img[i + 1] = c[1];
-  img[i + 2] = c[2];
-}
-
-function fillRect(x: number, y: number, w: number, h: number, c: RGB): void {
-  const x0 = Math.max(0, Math.floor(x));
-  const y0 = Math.max(0, Math.floor(y));
-  const x1 = Math.min(W, Math.ceil(x + w));
-  const y1 = Math.min(H, Math.ceil(y + h));
-  for (let yy = y0; yy < y1; yy++) {
-    for (let xx = x0; xx < x1; xx++) {
-      const i = (yy * W + xx) * 3;
-      img[i] = c[0];
-      img[i + 1] = c[1];
-      img[i + 2] = c[2];
+// ---------------- canvas ----------------
+class Canvas {
+  w: number;
+  h: number;
+  buf: Uint8Array;
+  constructor(w: number, h: number, bg: number) {
+    this.w = w;
+    this.h = h;
+    this.buf = new Uint8Array(w * h * 3);
+    this.fillRect(0, 0, w, h, bg);
+  }
+  px(x: number, y: number, c: number): void {
+    if (x < 0 || y < 0 || x >= this.w || y >= this.h) return;
+    const i = (y * this.w + x) * 3;
+    this.buf[i] = (c >> 16) & 0xff;
+    this.buf[i + 1] = (c >> 8) & 0xff;
+    this.buf[i + 2] = c & 0xff;
+  }
+  fillRect(x: number, y: number, w: number, h: number, c: number): void {
+    const x0 = Math.max(0, x);
+    const y0 = Math.max(0, y);
+    const x1 = Math.min(this.w, x + w);
+    const y1 = Math.min(this.h, y + h);
+    for (let yy = y0; yy < y1; yy++) {
+      for (let xx = x0; xx < x1; xx++) this.px(xx, yy, c);
     }
   }
-}
-
-function line(x0: number, y0: number, x1: number, y1: number, c: RGB, t = 1): void {
-  const dx = x1 - x0;
-  const dy = y1 - y0;
-  const steps = Math.max(Math.abs(dx), Math.abs(dy));
-  const half = Math.floor(t / 2);
-  for (let i = 0; i <= steps; i++) {
-    const x = Math.round(x0 + (dx * i) / Math.max(1, steps));
-    const y = Math.round(y0 + (dy * i) / Math.max(1, steps));
-    fillRect(x - half, y - half, t, t, c);
+  hline(x0: number, x1: number, y: number, c: number, t = 1): void {
+    for (let k = 0; k < t; k++) for (let x = x0; x <= x1; x++) this.px(x, y + k, c);
   }
-}
-
-function ellipse(cx: number, cy: number, rx: number, ry: number, c: RGB): void {
-  for (let dy = -ry; dy <= ry; dy++) {
-    const t = 1 - (dy * dy) / (ry * ry);
-    if (t < 0) continue;
-    const dx = Math.floor(rx * Math.sqrt(t));
-    fillRect(cx - dx, cy + dy, dx * 2 + 1, 1, c);
+  vline(x: number, y0: number, y1: number, c: number, t = 1): void {
+    for (let k = 0; k < t; k++) for (let y = y0; y <= y1; y++) this.px(x + k, y, c);
   }
-}
-
-function poly(pts: [number, number][], c: RGB): void {
-  let minY = Infinity;
-  let maxY = -Infinity;
-  for (const [, y] of pts) {
-    minY = Math.min(minY, y);
-    maxY = Math.max(maxY, y);
-  }
-  for (let y = Math.ceil(minY); y <= Math.floor(maxY); y++) {
-    const xs: number[] = [];
-    for (let i = 0; i < pts.length; i++) {
-      const [x0, y0] = pts[i];
-      const [x1, y1] = pts[(i + 1) % pts.length];
-      if ((y0 <= y && y1 > y) || (y1 <= y && y0 > y)) {
-        xs.push(x0 + ((y - y0) * (x1 - x0)) / (y1 - y0));
+  line(x0: number, y0: number, x1: number, y1: number, c: number, t = 1): void {
+    const dx = Math.abs(x1 - x0);
+    const dy = Math.abs(y1 - y0);
+    const sx = x0 < x1 ? 1 : -1;
+    const sy = y0 < y1 ? 1 : -1;
+    let err = dx - dy;
+    let x = x0;
+    let y = y0;
+    for (;;) {
+      for (let a = 0; a < t; a++) for (let b = 0; b < t; b++) this.px(x + a, y + b, c);
+      if (x === x1 && y === y1) break;
+      const e2 = 2 * err;
+      if (e2 > -dy) {
+        err -= dy;
+        x += sx;
+      }
+      if (e2 < dx) {
+        err += dx;
+        y += sy;
       }
     }
-    xs.sort((a, b) => a - b);
-    for (let k = 0; k + 1 < xs.length; k += 2) {
-      fillRect(Math.ceil(xs[k]), y, Math.floor(xs[k + 1]) - Math.ceil(xs[k]) + 1, 1, c);
+  }
+  fillCircle(cx: number, cy: number, r: number, c: number): void {
+    for (let y = -r; y <= r; y++) {
+      const half = Math.floor(Math.sqrt(r * r - y * y));
+      this.fillRect(cx - half, cy + y, half * 2 + 1, 1, c);
     }
+  }
+  fillEllipse(cx: number, cy: number, rx: number, ry: number, c: number): void {
+    for (let y = -ry; y <= ry; y++) {
+      const half = Math.floor(rx * Math.sqrt(1 - (y * y) / (ry * ry)));
+      this.fillRect(cx - half, cy + y, half * 2 + 1, 1, c);
+    }
+  }
+  fillPoly(pts: [number, number][], c: number): void {
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const p of pts) {
+      minY = Math.min(minY, p[1]);
+      maxY = Math.max(maxY, p[1]);
+    }
+    for (let y = minY; y <= maxY; y++) {
+      const xs: number[] = [];
+      for (let i = 0; i < pts.length; i++) {
+        const a = pts[i];
+        const b = pts[(i + 1) % pts.length];
+        if ((a[1] <= y && b[1] > y) || (b[1] <= y && a[1] > y)) {
+          xs.push(a[0] + ((y - a[1]) / (b[1] - a[1])) * (b[0] - a[0]));
+        }
+      }
+      xs.sort((p, q) => p - q);
+      for (let k = 0; k + 1 < xs.length; k += 2) {
+        this.fillRect(Math.ceil(xs[k]), y, Math.floor(xs[k + 1]) - Math.ceil(xs[k]) + 1, 1, c);
+      }
+    }
+  }
+  outlineRect(x: number, y: number, w: number, h: number, c: number, t = 1): void {
+    this.fillRect(x, y, w, t, c);
+    this.fillRect(x, y + h - t, w, t, c);
+    this.fillRect(x, y, t, h, c);
+    this.fillRect(x + w - t, y, t, h, c);
   }
 }
 
-function mix(a: RGB, b: RGB, f: number): RGB {
-  return [
-    Math.round(a[0] + (b[0] - a[0]) * f),
-    Math.round(a[1] + (b[1] - a[1]) * f),
-    Math.round(a[2] + (b[2] - a[2]) * f),
-  ];
-}
-
-// ---------------------------------------------------------------- fonts
-// FONT5: 5x7 bitmap caps, digits, punctuation. Hand-drawn for this entry.
+// ---------------- bitmap fonts (own design) ----------------
+// FONT5: 5 wide x 7 tall. Used for dateline, facts, card text, briefs, signs.
 const F5: Record<string, string[]> = {
-  A: ['.###.', '#...#', '#...#', '#####', '#...#', '#...#', '#...#'],
-  B: ['####.', '#...#', '#...#', '####.', '#...#', '#...#', '####.'],
-  C: ['.####', '#....', '#....', '#....', '#....', '#....', '.####'],
-  D: ['####.', '#...#', '#...#', '#...#', '#...#', '#...#', '####.'],
-  E: ['#####', '#....', '#....', '####.', '#....', '#....', '#####'],
-  F: ['#####', '#....', '#....', '####.', '#....', '#....', '#....'],
-  G: ['.####', '#....', '#....', '#.###', '#...#', '#...#', '.###.'],
-  H: ['#...#', '#...#', '#...#', '#####', '#...#', '#...#', '#...#'],
-  I: ['#####', '..#..', '..#..', '..#..', '..#..', '..#..', '#####'],
-  J: ['..###', '...#.', '...#.', '...#.', '...#.', '#..#.', '.##..'],
-  K: ['#...#', '#..#.', '#.#..', '##...', '#.#..', '#..#.', '#...#'],
-  L: ['#....', '#....', '#....', '#....', '#....', '#....', '#####'],
-  M: ['#...#', '##.##', '#.#.#', '#.#.#', '#...#', '#...#', '#...#'],
-  N: ['#...#', '##..#', '##..#', '#.#.#', '#..##', '#..##', '#...#'],
-  O: ['.###.', '#...#', '#...#', '#...#', '#...#', '#...#', '.###.'],
-  P: ['####.', '#...#', '#...#', '####.', '#....', '#....', '#....'],
-  Q: ['.###.', '#...#', '#...#', '#...#', '#.#.#', '#..#.', '.##.#'],
-  R: ['####.', '#...#', '#...#', '####.', '#.#..', '#..#.', '#...#'],
-  S: ['.####', '#....', '#....', '.###.', '....#', '....#', '####.'],
-  T: ['#####', '..#..', '..#..', '..#..', '..#..', '..#..', '..#..'],
-  U: ['#...#', '#...#', '#...#', '#...#', '#...#', '#...#', '.###.'],
-  V: ['#...#', '#...#', '#...#', '#...#', '#...#', '.#.#.', '..#..'],
-  W: ['#...#', '#...#', '#...#', '#.#.#', '#.#.#', '##.##', '#...#'],
-  X: ['#...#', '#...#', '.#.#.', '..#..', '.#.#.', '#...#', '#...#'],
-  Y: ['#...#', '#...#', '.#.#.', '..#..', '..#..', '..#..', '..#..'],
-  Z: ['#####', '....#', '...#.', '..#..', '.#...', '#....', '#####'],
-  '0': ['.###.', '#..##', '#.#.#', '##..#', '#...#', '#...#', '.###.'],
-  '1': ['..#..', '.##..', '..#..', '..#..', '..#..', '..#..', '.###.'],
-  '2': ['.###.', '#...#', '....#', '...#.', '..#..', '.#...', '#####'],
-  '3': ['####.', '....#', '....#', '.###.', '....#', '....#', '####.'],
-  '4': ['...#.', '..##.', '.#.#.', '#..#.', '#####', '...#.', '...#.'],
-  '5': ['#####', '#....', '####.', '....#', '....#', '#...#', '.###.'],
-  '6': ['.###.', '#....', '#....', '####.', '#...#', '#...#', '.###.'],
-  '7': ['#####', '....#', '...#.', '...#.', '..#..', '..#..', '..#..'],
-  '8': ['.###.', '#...#', '#...#', '.###.', '#...#', '#...#', '.###.'],
-  '9': ['.###.', '#...#', '#...#', '.####', '....#', '....#', '.###.'],
-  ' ': ['.....', '.....', '.....', '.....', '.....', '.....', '.....'],
-  '.': ['.....', '.....', '.....', '.....', '.....', '.....', '.##..'],
-  ',': ['.....', '.....', '.....', '.....', '.....', '.##..', '.#...'],
-  ':': ['.....', '.##..', '.##..', '.....', '.##..', '.##..', '.....'],
-  ';': ['.....', '.##..', '.##..', '.....', '.##..', '.##..', '.#...'],
-  '-': ['.....', '.....', '.....', '#####', '.....', '.....', '.....'],
-  "'": ['..#..', '..#..', '..#..', '.....', '.....', '.....', '.....'],
-  '%': ['##..#', '##.#.', '...#.', '..#..', '.#...', '#..##', '#..##'],
-  '(': ['...##', '..#..', '.#...', '.#...', '.#...', '..#..', '...##'],
-  ')': ['##...', '..#..', '...#.', '...#.', '...#.', '..#..', '##...'],
-  '/': ['....#', '....#', '...#.', '..#..', '.#...', '#....', '#....'],
-  '!': ['..#..', '..#..', '..#..', '..#..', '..#..', '.....', '..#..'],
-  '?': ['.###.', '#...#', '....#', '...#.', '..#..', '.....', '..#..'],
-  '&': ['.##..', '#..#.', '#.#..', '.#...', '#.##.', '#..#.', '.##.#'],
-  '+': ['.....', '..#..', '..#..', '#####', '..#..', '..#..', '.....'],
-  '=': ['.....', '.....', '#####', '.....', '#####', '.....', '.....'],
-  '"': ['.#.#.', '.#.#.', '.#.#.', '.....', '.....', '.....', '.....'],
-  $: ['..#..', '.####', '#.#..', '.###.', '..#.#', '####.', '..#..'],
+  A: [".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
+  B: ["####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."],
+  C: [".####", "#....", "#....", "#....", "#....", "#....", ".####"],
+  D: ["####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."],
+  E: ["#####", "#....", "#....", "####.", "#....", "#....", "#####"],
+  F: ["#####", "#....", "#....", "####.", "#....", "#....", "#...."],
+  G: [".####", "#....", "#....", "#.###", "#...#", "#...#", ".###."],
+  H: ["#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
+  I: ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####"],
+  J: ["..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."],
+  K: ["#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"],
+  L: ["#....", "#....", "#....", "#....", "#....", "#....", "#####"],
+  M: ["#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"],
+  N: ["#...#", "##..#", "##..#", "#.#.#", "#..##", "#..##", "#...#"],
+  O: [".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
+  P: ["####.", "#...#", "#...#", "####.", "#....", "#....", "#...."],
+  Q: [".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#"],
+  R: ["####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"],
+  S: [".####", "#....", "#....", ".###.", "....#", "....#", "####."],
+  T: ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."],
+  U: ["#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
+  V: ["#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."],
+  W: ["#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#"],
+  X: ["#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#"],
+  Y: ["#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."],
+  Z: ["#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"],
+  "0": [".###.", "#..##", "#.#.#", "#.#.#", "##..#", "#...#", ".###."],
+  "1": ["..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."],
+  "2": [".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"],
+  "3": ["####.", "....#", "....#", ".###.", "....#", "....#", "####."],
+  "4": ["...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."],
+  "5": ["#####", "#....", "####.", "....#", "....#", "#...#", ".###."],
+  "6": [".###.", "#....", "#....", "####.", "#...#", "#...#", ".###."],
+  "7": ["#####", "....#", "...#.", "..#..", "..#..", "..#..", "..#.."],
+  "8": [".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."],
+  "9": [".###.", "#...#", "#...#", ".####", "....#", "....#", ".###."],
+  " ": [".....", ".....", ".....", ".....", ".....", ".....", "....."],
+  ".": [".....", ".....", ".....", ".....", ".....", ".....", ".##.."],
+  ",": [".....", ".....", ".....", ".....", ".##..", ".##..", ".#..."],
+  "%": ["##..#", "##.#.", "...#.", "..#..", ".#...", "#.##.", "#..##"],
+  "-": [".....", ".....", ".....", ".###.", ".....", ".....", "....."],
+  "'": ["..#..", "..#..", "..#..", ".....", ".....", ".....", "....."],
+  "(": ["...#.", "..#..", ".#...", ".#...", ".#...", "..#..", "...#."],
+  ")": [".#...", "..#..", "...#.", "...#.", "...#.", "..#..", ".#..."],
+  ":": [".....", ".##..", ".##..", ".....", ".##..", ".##..", "....."],
+  ";": [".....", ".##..", ".##..", ".....", ".##..", ".##..", ".#..."],
+  "!": ["..#..", "..#..", "..#..", "..#..", "..#..", ".....", "..#.."],
+  "?": [".###.", "#...#", "....#", "...#.", "..#..", ".....", "..#.."],
+  "/": ["....#", "...#.", "...#.", "..#..", ".#...", ".#...", "#...."],
+  "+": [".....", "..#..", "..#..", "#####", "..#..", "..#..", "....."],
+  "=": [".....", ".....", "#####", ".....", "#####", ".....", "....."],
+  $: ["..#..", ".####", "#.#..", ".###.", "..#.#", "####.", "..#.."],
+  "&": [".##..", "#..#.", "#.#..", ".#...", "#.#.#", "#..#.", ".##.#"],
 };
 
-// FONT8: 8x12 bold display caps for masthead + headlines. Hand-drawn for this entry.
-const F8: Record<string, string[]> = {
-  A: ['..####..', '.##..##.', '##....##', '##....##', '##....##', '########', '##....##', '##....##', '##....##', '##....##', '##....##', '##....##'],
-  B: ['######..', '##....##', '##....##', '##....##', '######..', '##....##', '##....##', '##....##', '##....##', '##....##', '######..', '........'],
-  C: ['..####..', '.##..##.', '##....##', '##......', '##......', '##......', '##......', '##......', '##....##', '.##..##.', '..####..', '........'],
-  D: ['######..', '##....##', '##....##', '##....##', '##....##', '##....##', '##....##', '##....##', '##....##', '##....##', '######..', '........'],
-  E: ['########', '##......', '##......', '##......', '#####...', '##......', '##......', '##......', '##......', '##......', '########', '........'],
-  F: ['########', '##......', '##......', '##......', '#####...', '##......', '##......', '##......', '##......', '##......', '##......', '........'],
-  G: ['..####..', '.##..##.', '##....##', '##......', '##......', '##..####', '##....##', '##....##', '##....##', '.##..##.', '..####..', '........'],
-  H: ['##....##', '##....##', '##....##', '##....##', '########', '##....##', '##....##', '##....##', '##....##', '##....##', '##....##', '........'],
-  I: ['..####..', '...##...', '...##...', '...##...', '...##...', '...##...', '...##...', '...##...', '...##...', '...##...', '..####..', '........'],
-  J: ['....####', '.....##.', '.....##.', '.....##.', '.....##.', '.....##.', '.....##.', '##...##.', '##...##.', '.##..##.', '..####..', '........'],
-  K: ['##....##', '##...##.', '##..##..', '##.##...', '####....', '##.##...', '##..##..', '##...##.', '##....##', '##....##', '##....##', '........'],
-  L: ['##......', '##......', '##......', '##......', '##......', '##......', '##......', '##......', '##......', '##......', '########', '........'],
-  M: ['##....##', '###..###', '##.##.##', '##.##.##', '##.##.##', '##....##', '##....##', '##....##', '##....##', '##....##', '##....##', '........'],
-  N: ['##....##', '###...##', '####..##', '##.##.##', '##..####', '##...###', '##....##', '##....##', '##....##', '##....##', '##....##', '........'],
-  O: ['..####..', '.##..##.', '##....##', '##....##', '##....##', '##....##', '##....##', '##....##', '##....##', '.##..##.', '..####..', '........'],
-  P: ['######..', '##....##', '##....##', '##....##', '######..', '##......', '##......', '##......', '##......', '##......', '##......', '........'],
-  Q: ['..####..', '.##..##.', '##....##', '##....##', '##....##', '##....##', '##..#.##', '##...###', '##....##', '.##..##.', '..####.#', '........'],
-  R: ['######..', '##....##', '##....##', '##....##', '######..', '##..##..', '##...##.', '##....##', '##....##', '##....##', '##....##', '........'],
-  S: ['..####..', '.##..##.', '##....##', '##......', '.####...', '....##..', '.....##.', '.....##.', '##....##', '.##..##.', '..####..', '........'],
-  T: ['########', '...##...', '...##...', '...##...', '...##...', '...##...', '...##...', '...##...', '...##...', '...##...', '...##...', '........'],
-  U: ['##....##', '##....##', '##....##', '##....##', '##....##', '##....##', '##....##', '##....##', '##....##', '.##..##.', '..####..', '........'],
-  V: ['##....##', '##....##', '##....##', '##....##', '##....##', '##....##', '##....##', '.##..##.', '.##..##.', '..####..', '...##...', '........'],
-  W: ['##....##', '##....##', '##....##', '##....##', '##....##', '##.##.##', '##.##.##', '##.##.##', '##.##.##', '.##..##.', '.##..##.', '........'],
-  X: ['##....##', '##....##', '.##..##.', '..####..', '...##...', '..####..', '.##..##.', '##....##', '##....##', '##....##', '##....##', '........'],
-  Y: ['##....##', '##....##', '.##..##.', '..####..', '...##...', '...##...', '...##...', '...##...', '...##...', '...##...', '...##...', '........'],
-  Z: ['########', '......##', '.....##.', '....##..', '...##...', '..##....', '.##.....', '##......', '##......', '##......', '########', '........'],
-  ' ': ['........', '........', '........', '........', '........', '........', '........', '........', '........', '........', '........', '........'],
+// FONT12: 8 wide x 12 tall, bold display face. Masthead + lead headline.
+const F12: Record<string, string[]> = {
+  A: ["..####..", ".##..##.", "##....##", "##....##", "##....##", "########", "##....##", "##....##", "##....##", "##....##", "##....##", "##....##"],
+  B: ["#######.", "##....##", "##....##", "##....##", "#######.", "##....##", "##....##", "##....##", "##....##", "##....##", "#######.", "........"],
+  C: ["..#####.", ".##...##", "##.....#", "##......", "##......", "##......", "##......", "##......", "##.....#", ".##...##", "..#####.", "........"],
+  D: ["######..", "##....##", "##....##", "##....##", "##....##", "##....##", "##....##", "##....##", "##....##", "##....##", "######..", "........"],
+  E: ["########", "##......", "##......", "##......", "#####...", "##......", "##......", "##......", "##......", "##......", "########", "........"],
+  F: ["########", "##......", "##......", "##......", "#####...", "##......", "##......", "##......", "##......", "##......", "##......", "........"],
+  G: ["..#####.", ".##...##", "##.....#", "##......", "##......", "##..####", "##....##", "##....##", "##....##", ".##...##", "..####..", "........"],
+  H: ["##....##", "##....##", "##....##", "##....##", "########", "##....##", "##....##", "##....##", "##....##", "##....##", "##....##", "##....##"],
+  I: ["########", "...##...", "...##...", "...##...", "...##...", "...##...", "...##...", "...##...", "...##...", "...##...", "########", "........"],
+  L: ["##......", "##......", "##......", "##......", "##......", "##......", "##......", "##......", "##......", "##......", "########", "........"],
+  N: ["##....##", "###...##", "###...##", "####..##", "##.#..##", "##..#.##", "##...###", "##...###", "##....##", "##....##", "##....##", "##....##"],
+  O: ["..####..", ".##..##.", "##....##", "##....##", "##....##", "##....##", "##....##", "##....##", "##....##", "##....##", ".##..##.", "..####.."],
+  P: ["#######.", "##....##", "##....##", "##....##", "#######.", "##......", "##......", "##......", "##......", "##......", "##......", "........"],
+  R: ["#######.", "##....##", "##....##", "##....##", "#######.", "##..##..", "##...##.", "##....##", "##....##", "##....##", "##....##", "........"],
+  S: ["..#####.", ".##...##", "##.....#", "##......", ".#####..", "......##", "......##", "##.....#", "##.....#", ".##...##", "..#####.", "........"],
+  T: ["########", "...##...", "...##...", "...##...", "...##...", "...##...", "...##...", "...##...", "...##...", "...##...", "...##...", "........"],
+  U: ["##....##", "##....##", "##....##", "##....##", "##....##", "##....##", "##....##", "##....##", "##....##", "##....##", ".##..##.", "..####.."],
+  W: ["##....##", "##....##", "##....##", "##....##", "##....##", "##.##.##", "##.##.##", "##.##.##", "##.##.##", ".##..##.", ".##..##.", "........"],
+  " ": ["........", "........", "........", "........", "........", "........", "........", "........", "........", "........", "........", "........"],
 };
 
-function drawGlyph5(g: string[], x: number, y: number, s: number, c: RGB, tall: boolean): void {
-  let yy = y;
-  for (let r = 0; r < 7; r++) {
-    const rh = tall ? (r === 3 ? 4 : 3) : s;
-    const row = g[r];
-    for (let col = 0; col < 5; col++) {
-      if (row[col] === '#') fillRect(x + col * s, yy, s, rh, c);
-    }
-    yy += rh;
-  }
+function glyphRows(font: Record<string, string[]>, ch: string): string[] {
+  const g = font[ch];
+  if (g) return g;
+  return font[" "] || [];
 }
 
-function drawText5(s: string, x: number, y: number, scale: number, c: RGB, track = 1, tall = false): void {
+function textWidth(s: string, font: Record<string, string[]>, scale: number, gap: number): number {
+  const sample = glyphRows(font, "A");
+  const gw = sample.length ? sample[0].length : 5;
+  let w = 0;
+  for (let i = 0; i < s.length; i++) w += gw * scale + gap;
+  return w - gap;
+}
+
+// rowExtra: glyph-row indices drawn 1 px taller (briefs 22/23 px stretch).
+function drawText(cv: Canvas, x: number, y: number, s: string, font: Record<string, string[]>, scale: number, color: number, gap = 2, rowExtra: number[] = []): number {
+  const sample = glyphRows(font, "A");
+  const rows = sample.length;
+  const gw = sample[0].length;
+  const rh: number[] = [];
+  for (let r = 0; r < rows; r++) rh.push(scale + (rowExtra.includes(r) ? 1 : 0));
   let cx = x;
-  for (const ch of s) {
-    const g = F5[ch];
-    if (g) drawGlyph5(g, cx, y, scale, c, tall);
-    cx += (5 + track) * scale;
-  }
-}
-
-function width5(s: string, scale: number, track = 1): number {
-  if (s.length === 0) return 0;
-  return (s.length - 1) * (5 + track) * scale + 5 * scale;
-}
-
-function drawGlyph8(g: string[], x: number, y: number, s: number, c: RGB): void {
-  for (let r = 0; r < 12; r++) {
-    const row = g[r];
-    for (let col = 0; col < 8; col++) {
-      if (row[col] === '#') fillRect(x + col * s, y + r * s, s, s, c);
+  for (let i = 0; i < s.length; i++) {
+    const g = glyphRows(font, s[i]);
+    let ry = y;
+    for (let r = 0; r < rows; r++) {
+      const row = g[r] || "";
+      for (let col = 0; col < gw; col++) {
+        if (row[col] === "#") cv.fillRect(cx + col * scale, ry, scale, rh[r], color);
+      }
+      ry += rh[r];
     }
+    cx += gw * scale + gap;
   }
+  return cx - gap - x;
 }
 
-function drawText8(s: string, x: number, y: number, scale: number, c: RGB, track = 1): void {
-  let cx = x;
-  for (const ch of s) {
-    const g = F8[ch];
-    if (g) drawGlyph8(g, cx, y, scale, c);
-    cx += (8 + track) * scale;
-  }
+function drawTextCentered(cv: Canvas, cx: number, y: number, s: string, font: Record<string, string[]>, scale: number, color: number, gap = 2): void {
+  const w = textWidth(s, font, scale, gap);
+  drawText(cv, Math.round(cx - w / 2), y, s, font, scale, color, gap);
 }
 
-function width8(s: string, scale: number, track = 1): number {
-  if (s.length === 0) return 0;
-  return (s.length - 1) * (8 + track) * scale + 8 * scale;
-}
+// ---------------- figures ----------------
+const SHIRTS = [0xc0392b, 0x2471a3, 0x229954, 0xd4ac0d, 0xf6f0e1, 0x7d3c98, 0x148f77, 0xe67e22];
 
-// ---------------------------------------------------------------- crowd
-const SKIN: RGB = [200, 155, 108];
-const PANTS: RGB = [40, 36, 32];
-const SHIRTS: RGB[] = [
-  [200, 60, 50],
-  [50, 90, 180],
-  [60, 140, 70],
-  [220, 180, 40],
-  [240, 235, 225],
-  [120, 80, 170],
-  [40, 150, 150],
-  [230, 120, 40],
-];
-const DIM: RGB = [120, 115, 105];
-
-type Pose = 'stand' | 'cheer' | 'phone' | 'hat' | 'umbrella' | 'placard';
-
-function figure(x: number, baseY: number, h: number, shirt: RGB, pose: Pose, board: RGB | null): void {
-  const headY = baseY - h + 3;
-  const shoulderY = baseY - h + 7;
-  const torsoH = Math.round(h * 0.42);
-  const waistY = shoulderY + torsoH;
-  // head
-  ellipse(x, headY, 3, 3, SKIN);
-  // torso
-  fillRect(x - 2, shoulderY, 5, torsoH, shirt);
-  // legs
-  line(x, waistY, x - 4, baseY, PANTS, 2);
-  line(x, waistY, x + 4, baseY, PANTS, 2);
-  // arms
-  if (pose === 'cheer') {
-    line(x - 2, shoulderY + 2, x - 7, shoulderY - 6, SKIN, 2);
-    line(x + 2, shoulderY + 2, x + 7, shoulderY - 6, SKIN, 2);
-  } else if (pose === 'phone') {
-    line(x - 2, shoulderY + 2, x - 6, shoulderY + 10, SKIN, 2);
-    line(x + 2, shoulderY + 2, x + 6, shoulderY - 6, SKIN, 2);
-    fillRect(x + 4, shoulderY - 11, 4, 6, INK);
-  } else if (pose === 'placard') {
-    line(x - 2, shoulderY + 2, x - 6, shoulderY + 10, SKIN, 2);
-    line(x + 2, shoulderY + 2, x + 4, shoulderY - 10, SKIN, 2);
-    line(x + 4, shoulderY - 10, x + 4, shoulderY - 22, [90, 80, 60], 2);
-    if (board) fillRect(x - 4, shoulderY - 32, 16, 10, board);
+// pose: 0 arms down, 1 cheering, 2 phone up, 3 hat, 4 umbrella
+function drawFigure(cv: Canvas, x: number, baseY: number, h: number, shirt: number, pose: number): void {
+  const headR = Math.max(2, Math.round(h * 0.11));
+  const headY = baseY - h + headR;
+  cv.fillCircle(x, headY, headR, SKIN);
+  const bodyTop = headY + headR + 1;
+  const bodyH = Math.round(h * 0.42);
+  const bw = Math.max(4, Math.round(h * 0.18));
+  cv.fillRect(x - Math.floor(bw / 2), bodyTop, bw, bodyH, shirt);
+  const legTop = bodyTop + bodyH;
+  const legH = baseY - legTop;
+  cv.fillRect(x - 3, legTop, 2, legH, PANTS);
+  cv.fillRect(x + 1, legTop, 2, legH, PANTS);
+  const armY = bodyTop + 2;
+  if (pose === 1) {
+    cv.line(x - 4, armY, x - 8, armY - 7, shirt, 2);
+    cv.line(x + 4, armY, x + 8, armY - 7, shirt, 2);
+  } else if (pose === 2) {
+    cv.line(x - 4, armY, x - 6, armY + 5, shirt, 2);
+    cv.line(x + 4, armY, x + 8, armY - 8, shirt, 2);
+    cv.fillRect(x + 6, armY - 12, 4, 6, INK);
   } else {
-    line(x - 2, shoulderY + 2, x - 6, shoulderY + 10, SKIN, 2);
-    line(x + 2, shoulderY + 2, x + 6, shoulderY + 10, SKIN, 2);
-  }
-  // hat
-  if (pose === 'hat') {
-    fillRect(x - 4, headY - 5, 9, 3, [30, 28, 26]);
-    fillRect(x - 5, headY - 3, 11, 2, [30, 28, 26]);
-  }
-  // umbrella
-  if (pose === 'umbrella') {
-    line(x, headY - 2, x, headY - 14, [90, 80, 60], 2);
-    poly(
-      [
-        [x - 11, headY - 14],
-        [x + 11, headY - 14],
-        [x, headY - 22],
-      ],
-      [200, 50, 45],
-    );
+    cv.line(x - 4, armY, x - 6, armY + 6, shirt, 2);
+    cv.line(x + 4, armY, x + 6, armY + 6, shirt, 2);
+    if (pose === 3) {
+      cv.fillRect(x - headR - 1, headY - headR - 2, headR * 2 + 2, 3, 0x7d3c98);
+    } else if (pose === 4) {
+      cv.fillEllipse(x, headY - headR - 6, 10, 5, 0xc0392b);
+      cv.vline(x, headY - headR - 6, headY - headR + 2, INK, 1);
+    }
   }
 }
 
-// ---------------------------------------------------------------- lead scene
-function drawLeadScene(): void {
-  const sx = 24;
-  const sy = 210;
-  const sw = 976;
-  const sh = 310;
-  // sky: four dawn bands
-  const bands: RGB[] = [
-    [240, 192, 120],
-    [227, 154, 94],
-    [232, 207, 160],
-    [216, 220, 200],
-  ];
-  for (let i = 0; i < 4; i++) {
-    fillRect(sx, sy + i * 37, sw, 37, bands[i]);
-  }
-  // sun: disc, halo rings, double rays (slightly longer + thicker than v5)
-  const sunX = 885;
-  const sunY = 262;
-  const sunC: RGB = [245, 215, 110];
-  const rayC: RGB = [239, 201, 94];
-  ellipse(sunX, sunY, 52, 52, [242, 227, 161]);
-  ellipse(sunX, sunY, 42, 42, [244, 224, 140]);
-  const angles = [-2.8, -2.2, -1.6, -1.0, -0.4, 0.2, 0.8, 1.4, 2.0, 2.6];
-  for (const a of angles) {
-    const ca = Math.cos(a);
-    const sa = Math.sin(a);
-    const px = -sa;
-    const py = ca;
-    for (const off of [-3, 3]) {
-      line(
-        Math.round(sunX + ca * 58 + px * off),
-        Math.round(sunY + sa * 58 + py * off),
-        Math.round(sunX + ca * 100 + px * off),
-        Math.round(sunY + sa * 100 + py * off),
-        rayC,
-        2,
+// Foreground detail: journalist with camera on tripod (bigger, at left edge).
+function drawJournalist(cv: Canvas, x: number, baseY: number): void {
+  const h = 46;
+  const headY = baseY - h + 5;
+  cv.fillCircle(x, headY, 5, SKIN);
+  cv.fillRect(x - 6, headY - 6, 12, 3, INK); // cap
+  cv.fillRect(x - 6, headY + 6, 12, 16, 0x2e4053); // jacket
+  cv.fillRect(x - 6, headY + 22, 4, baseY - (headY + 22), INK); // legs
+  cv.fillRect(x + 2, headY + 22, 4, baseY - (headY + 22), INK);
+  const tx = x + 16;
+  const ty = baseY - 26;
+  cv.line(tx, ty, tx - 10, baseY, INK, 2);
+  cv.line(tx, ty, tx + 10, baseY, INK, 2);
+  cv.line(tx, ty, tx, baseY, INK, 2);
+  cv.fillRect(tx - 7, ty - 8, 14, 9, INK); // camera body
+  cv.fillCircle(tx + 8, ty - 4, 3, 0x5d6d7e); // lens
+}
+
+// Foreground detail: uniformed officer with cap, arm raised (right edge).
+function drawOfficer(cv: Canvas, x: number, baseY: number): void {
+  const h = 48;
+  const headY = baseY - h + 5;
+  const navy = 0x1f3864;
+  cv.fillCircle(x, headY, 5, SKIN);
+  cv.fillRect(x - 6, headY - 6, 12, 4, navy); // cap
+  cv.fillRect(x - 6, headY - 2, 14, 2, 0x0f1e33); // brim
+  cv.fillRect(x - 6, headY + 6, 12, 17, navy); // uniform
+  cv.fillRect(x - 6, headY + 18, 12, 2, GOLD); // belt
+  cv.fillRect(x - 6, headY + 23, 4, baseY - (headY + 23), INK);
+  cv.fillRect(x + 2, headY + 23, 4, baseY - (headY + 23), INK);
+  cv.line(x + 5, headY + 8, x + 13, headY - 2, navy, 2); // raised arm
+}
+
+function drawSun(cv: Canvas, cx: number, cy: number): void {
+  const halo = 0xf5d67a;
+  const disc = 0xffe9a8;
+  for (let k = 0; k < 8; k++) {
+    const a = (k * Math.PI) / 4;
+    const dx = Math.cos(a);
+    const dy = Math.sin(a);
+    const px = -dy;
+    const py = dx;
+    for (const off of [-2, 2]) {
+      cv.line(
+        Math.round(cx + dx * 50 + px * off),
+        Math.round(cy + dy * 50 + py * off),
+        Math.round(cx + dx * 100 + px * off),
+        Math.round(cy + dy * 100 + py * off),
+        halo,
+        2
       );
     }
   }
-  ellipse(sunX, sunY, 30, 30, sunC);
-  // helicopter spotlight beam (lands on open plaza, clear of both buildings)
-  poly(
-    [
-      [395, 322],
-      [425, 322],
-      [345, 462],
-      [245, 462],
-    ],
-    [242, 227, 161],
-  );
-  ellipse(295, 462, 55, 10, [247, 236, 192]);
-  // helicopter (large, upper sky)
-  poly(
-    [
-      [355, 292],
-      [290, 272],
-      [290, 282],
-      [355, 308],
-    ],
-    [70, 82, 63],
-  );
-  poly(
-    [
-      [290, 272],
-      [278, 250],
-      [290, 250],
-    ],
-    [58, 70, 54],
-  );
-  line(282, 250, 282, 266, INK, 2);
-  line(320, 272, 540, 272, INK, 3);
-  fillRect(425, 272, 6, 14, INK);
-  ellipse(430, 300, 80, 22, [70, 82, 63]);
-  ellipse(495, 298, 22, 14, [127, 168, 184]);
-  line(380, 326, 480, 326, INK, 3);
-  line(400, 324, 395, 332, INK, 2);
-  line(460, 324, 465, 332, INK, 2);
-  // buildings
-  // left block
-  fillRect(sx, 358, 176, 107, [90, 100, 112]);
+  cv.fillCircle(cx, cy, 46, halo);
+  cv.fillCircle(cx, cy, 34, disc);
+}
+
+function drawHelicopter(cv: Canvas, cx: number, cy: number): void {
+  const body = 0x2e2a26;
+  cv.fillRect(cx - 105, cy - 4, 60, 8, body); // tail boom
+  cv.fillPoly([[cx - 105, cy - 4], [cx - 112, cy - 22], [cx - 100, cy - 4]], body); // tail fin
+  cv.vline(cx - 108, cy - 22, cy + 2, body, 2); // tail rotor
+  cv.fillEllipse(cx, cy + 6, 52, 16, body); // body
+  cv.fillEllipse(cx + 32, cy + 2, 14, 8, 0xbfe3d8); // cockpit window
+  cv.hline(cx - 40, cx + 40, cy + 26, body, 2); // skids
+  cv.line(cx - 30, cy + 20, cx - 34, cy + 26, body, 2);
+  cv.line(cx + 30, cy + 20, cx + 34, cy + 26, body, 2);
+  cv.hline(cx - 70, cx + 70, cy - 16, body, 3); // main rotor
+  cv.vline(cx, cy - 16, cy - 8, body, 2);
+}
+
+// ---------------- lead scene ----------------
+function drawScene(cv: Canvas): void {
+  const x0 = 16;
+  const x1 = 1008;
+  const y0 = 226;
+  const y1 = 556;
+  const sky = [0xf9dc9f, 0xf2c078, 0xe8a85c, 0xd98e4a];
+  const bandH = Math.ceil((y1 - y0) / 4);
+  for (let i = 0; i < 4; i++) cv.fillRect(x0, y0 + i * bandH, x1 - x0, bandH, sky[i]);
+  drawSun(cv, 920, 292);
+  // side buildings
+  cv.fillRect(16, 380, 284, 120, 0x6b4a2f);
+  cv.fillRect(700, 392, 308, 108, 0x7a5636);
   for (let r = 0; r < 4; r++) {
-    for (let c = 0; c < 6; c++) {
-      const lit = (r + c) % 3 === 0;
-      fillRect(38 + c * 28, 372 + r * 22, 12, 12, lit ? [232, 217, 138] : [60, 68, 78]);
+    for (let c = 0; c < 8; c++) {
+      if ((r * 7 + c * 3) % 4 !== 0) cv.fillRect(30 + c * 33, 394 + r * 26, 14, 14, 0xffe9a8);
+      if ((r * 5 + c * 2) % 3 !== 0) cv.fillRect(714 + c * 36, 404 + r * 24, 14, 12, 0xffe9a8);
     }
   }
-  // supermarket EXITO
-  fillRect(520, 350, 300, 115, [232, 220, 200]);
-  fillRect(520, 350, 300, 18, RED);
-  drawText5('EXITO', 641, 354, 2, [255, 248, 240]);
-  fillRect(540, 382, 120, 20, [180, 200, 210]);
-  fillRect(700, 382, 100, 20, [180, 200, 210]);
-  fillRect(560, 412, 56, 53, [90, 80, 70]);
-  fillRect(700, 412, 56, 53, [90, 80, 70]);
-  fillRect(640, 412, 40, 53, [120, 110, 96]);
-  // Colombia flag on the supermarket
-  line(740, 318, 740, 350, INK, 2);
-  fillRect(742, 318, 44, 13, [252, 210, 30]);
-  fillRect(742, 331, 44, 6, [30, 60, 150]);
-  fillRect(742, 337, 44, 7, [210, 40, 35]);
-  // right block
-  fillRect(820, 365, 180, 100, [107, 90, 68]);
-  for (let r = 0; r < 3; r++) {
-    for (let c = 0; c < 5; c++) {
-      const lit = (r * 2 + c) % 3 === 0;
-      fillRect(834 + c * 34, 378 + r * 26, 14, 14, lit ? [232, 217, 138] : [70, 60, 46]);
-    }
-  }
-  // armored vehicle on the street
-  fillRect(620, 438, 140, 20, [74, 82, 64]);
-  fillRect(660, 424, 50, 16, [74, 82, 64]);
-  fillRect(700, 416, 24, 10, [60, 68, 54]);
-  ellipse(650, 462, 8, 8, [30, 28, 24]);
-  ellipse(730, 462, 8, 8, [30, 28, 24]);
-  // street
-  fillRect(sx, 465, sw, 55, [55, 51, 44]);
-  for (let x = 40; x < 990; x += 48) fillRect(x, 490, 24, 3, [201, 194, 176]);
-  // crowd: back row (smaller, dimmer, deeper) then front row (taller, coloured)
-  const backPoses: Pose[] = ['stand', 'stand', 'placard', 'stand', 'hat', 'stand', 'stand', 'placard', 'stand', 'stand', 'hat', 'stand', 'placard', 'stand', 'stand', 'hat'];
-  const backBoards: (RGB | null)[] = [null, null, GOLD, null, null, null, null, [200, 60, 50], null, null, null, null, [240, 235, 225], null, null, null];
+  // street + sidewalk
+  cv.fillRect(16, 500, 992, 56, 0x7a5a3e);
+  cv.fillRect(16, 496, 992, 6, 0xa8855f);
+  // supermarket EXITO (centre)
+  cv.fillRect(330, 400, 360, 110, 0x2e6b5e);
+  cv.fillRect(330, 400, 360, 16, 0x1e4a42);
+  drawTextCentered(cv, 510, 424, "EXITO", F5, 3, 0xffffff, 3);
+  cv.fillRect(360, 462, 60, 48, 0xbfe3d8);
+  cv.fillRect(600, 462, 60, 48, 0xbfe3d8);
+  cv.vline(390, 462, 510, 0x1e4a42, 2);
+  cv.vline(630, 462, 510, 0x1e4a42, 2);
+  // Colombian flag at the entrance
+  cv.vline(668, 428, 500, INK, 2);
+  cv.fillRect(670, 428, 34, 12, 0xfcd116);
+  cv.fillRect(670, 440, 34, 6, 0x003087);
+  cv.fillRect(670, 446, 34, 6, 0xce1126);
+  // armored vehicle at the entrance
+  cv.fillRect(560, 480, 96, 24, 0x2e2a26);
+  cv.fillRect(600, 466, 40, 16, 0x2e2a26);
+  cv.fillRect(608, 470, 24, 8, 0xbfe3d8);
+  cv.fillCircle(580, 506, 7, INK);
+  cv.fillCircle(612, 506, 7, INK);
+  cv.fillCircle(644, 506, 7, INK);
+  // helicopter + spotlight beam landing in the open plaza
+  drawHelicopter(cv, 400, 300);
+  cv.line(392, 326, 372, 502, 0xffe9a8, 2);
+  cv.line(416, 326, 444, 502, 0xffe9a8, 2);
+  cv.fillEllipse(408, 508, 40, 7, 0xffe9a8);
+  // crowd — background row, 16 figures, varied heights, 3 placards
+  const poses = [1, 2, 3, 0, 4, 1, 0, 2, 3, 1, 0, 4, 2, 1, 3, 0];
   for (let i = 0; i < 16; i++) {
-    const x = 56 + i * 60;
+    const x = 60 + i * 58;
     const h = 20 + ((i * 7) % 7);
-    const shirt = mix(SHIRTS[i % 8], DIM, 0.55);
-    figure(x, 500, h, shirt, backPoses[i], backBoards[i]);
+    drawFigure(cv, x, 538, h, SHIRTS[i % 8], poses[i]);
+    if (i === 3 || i === 8 || i === 12) {
+      const pc = i === 3 ? GOLD : i === 8 ? 0xc0392b : 0xf6f0e1;
+      cv.vline(x + 6, 538 - h - 14, 538 - h + 2, INK, 2);
+      cv.fillRect(x - 1, 538 - h - 24, 14, 10, pc);
+      cv.outlineRect(x - 1, 538 - h - 24, 14, 10, INK, 1);
+    }
   }
-  const frontPoses: Pose[] = ['cheer', 'phone', 'stand', 'hat', 'cheer', 'phone', 'stand', 'hat', 'umbrella', 'cheer', 'phone', 'stand', 'hat', 'umbrella'];
+  // crowd — front row, 14 figures, coloured + posed
+  const fposes = [1, 2, 3, 4, 0, 1, 2, 3, 0, 4, 1, 2, 3, 0];
   for (let i = 0; i < 14; i++) {
-    const x = 62 + i * 66;
-    const h = 26 + ((i * 11) % 9);
-    figure(x, 516, h, SHIRTS[i % 8], frontPoses[i], null);
+    const x = 100 + i * 62;
+    const h = 28 + ((i * 5) % 7);
+    drawFigure(cv, x, 552, h, SHIRTS[(i + 3) % 8], fposes[i]);
   }
-  // frame
-  fillRect(sx, sy, sw, 2, INK);
-  fillRect(sx, sy + sh - 2, sw, 2, INK);
-  fillRect(sx, sy, 2, sh, INK);
-  fillRect(sx + sw - 2, sy, 2, sh, INK);
+  // foreground detail figures
+  drawJournalist(cv, 40, 556);
+  drawOfficer(cv, 972, 556);
 }
 
-// ---------------------------------------------------------------- cards
-function drawCard(cx: number, cy: number, kicker: string, t1: string, t2: string, facts: string[], art: (bx: number, by: number, bw: number, bh: number) => void): void {
-  const cw = 482;
-  const ch = 134;
-  fillRect(cx, cy, cw, ch, CARD);
-  fillRect(cx, cy, cw, 2, INK);
-  fillRect(cx, cy + ch - 2, cw, 2, INK);
-  fillRect(cx, cy, 2, ch, INK);
-  fillRect(cx + cw - 2, cy, 2, ch, INK);
-  drawText5(kicker, cx + 12, cy + 9, 2, RED);
-  drawText5(t1, cx + 12, cy + 28, 3, INK);
-  drawText5(t2, cx + 12, cy + 50, 3, INK);
-  for (let i = 0; i < facts.length; i++) {
-    drawText5(facts[i], cx + 12, cy + 78 + i * 17, 2, INK);
+// ---------------- secondary cards ----------------
+function drawCardArt(cv: Canvas, ax: number, ay: number, aw: number, ah: number, art: number): void {
+  if (art === 0) {
+    // SPACE: rocket + Earth
+    cv.fillRect(ax, ay, aw, ah, 0x141b33);
+    const stars: [number, number][] = [[12, 10], [40, 22], [90, 8], [120, 30], [20, 44], [70, 38], [130, 50], [100, 60], [30, 70], [55, 14]];
+    for (const s of stars) cv.fillRect(ax + s[0], ay + s[1], 2, 2, 0xffffff);
+    const rx = ax + 68;
+    const ry = ay + 12;
+    cv.fillRect(rx - 7, ry + 10, 14, 34, 0xffffff);
+    cv.fillPoly([[rx - 7, ry + 10], [rx, ry], [rx + 7, ry + 10]], 0xc0392b);
+    cv.fillPoly([[rx - 7, ry + 44], [rx - 13, ry + 56], [rx - 7, ry + 50]], 0xc0392b);
+    cv.fillPoly([[rx + 7, ry + 44], [rx + 13, ry + 56], [rx + 7, ry + 50]], 0xc0392b);
+    cv.fillPoly([[rx - 4, ry + 44], [rx, ry + 60], [rx + 4, ry + 44]], 0xe67e22);
+    cv.fillRect(rx - 7, ry + 22, 14, 4, 0x2471a3);
+    cv.fillCircle(ax + 75, ay + 112, 26, 0x3a6fd8);
+    cv.fillEllipse(ax + 66, ay + 106, 9, 5, 0x4caf50);
+    cv.fillEllipse(ax + 84, ay + 118, 7, 4, 0x4caf50);
+    cv.fillEllipse(ax + 74, ay + 122, 10, 3, 0xffffff);
+  } else if (art === 1) {
+    // BANGLADESH: "36 %" + gold arrow + factory
+    cv.fillRect(ax, ay, aw, ah, 0xf2e3c0);
+    drawText(cv, ax + 27, ay + 12, "36 %", F5, 4, INK, 4);
+    cv.line(ax + 112, ay + 58, ax + 140, ay + 22, GOLD, 4);
+    cv.line(ax + 140, ay + 22, ax + 126, ay + 22, GOLD, 4);
+    cv.line(ax + 140, ay + 22, ax + 140, ay + 36, GOLD, 4);
+    cv.fillRect(ax + 8, ay + 96, 134, 44, 0x3a2e22);
+    cv.fillRect(ax + 20, ay + 66, 12, 30, 0x3a2e22);
+    cv.fillRect(ax + 44, ay + 76, 12, 20, 0x3a2e22);
+    cv.fillCircle(ax + 26, ay + 60, 6, 0x9a9a9a);
+    cv.fillCircle(ax + 50, ay + 70, 5, 0x9a9a9a);
+    for (let i = 0; i < 6; i++) cv.fillRect(ax + 16 + i * 20, ay + 108, 10, 10, 0xffe9a8);
+  } else if (art === 2) {
+    // INDONESIA: flooded mine shaft
+    cv.fillRect(ax, ay, aw, ah, 0xe8d9b0);
+    cv.fillPoly([[ax, ay + 140], [ax, ay + 84], [ax + 60, ay + 56], [ax + 110, ay + 88], [ax + 150, ay + 76], [ax + 150, ay + 140]], 0x5a7a3a);
+    cv.fillRect(ax + 66, ay + 60, 16, 66, INK);
+    cv.fillRect(ax + 60, ay + 54, 28, 8, 0x3a2e22);
+    cv.fillPoly([[ax + 74, ay + 40], [ax + 88, ay + 54], [ax + 60, ay + 54]], GOLD);
+    cv.fillRect(ax + 73, ay + 46, 2, 5, INK);
+    cv.fillRect(ax, ay + 122, 150, 18, 0x3a6fd8);
+    cv.hline(ax + 8, ax + 60, ay + 128, 0xffffff, 2);
+    cv.hline(ax + 90, ax + 140, ay + 132, 0xffffff, 2);
+  } else {
+    // EUROPE: hangar + jets + smoke
+    cv.fillRect(ax, ay, aw, ah, 0xc9cfd6);
+    cv.fillRect(ax + 10, ay + 66, 130, 74, 0x5d6d7e);
+    cv.fillPoly([[ax + 10, ay + 66], [ax + 75, ay + 40], [ax + 140, ay + 66]], 0x2e4053);
+    cv.fillRect(ax + 55, ay + 96, 40, 44, INK);
+    cv.fillCircle(ax + 34, ay + 52, 7, 0x9a9a9a);
+    cv.fillCircle(ax + 46, ay + 38, 6, 0xb0b0b0);
+    cv.fillCircle(ax + 30, ay + 26, 5, 0xc0c0c0);
+    cv.fillRect(ax, ay + 122, 150, 18, 0x8a8a8a);
+    for (let i = 0; i < 5; i++) cv.fillRect(ax + 10 + i * 28, ay + 129, 14, 3, 0xffffff);
+    // jets in light paint so they read against the grey hangar/runway
+    cv.fillPoly([[ax + 96, ay + 108], [ax + 128, ay + 118], [ax + 96, ay + 122]], 0xffffff);
+    cv.fillPoly([[ax + 60, ay + 112], [ax + 86, ay + 120], [ax + 60, ay + 124]], 0xffffff);
+    cv.hline(ax + 88, ax + 94, ay + 118, 0xffffff, 2);
+    cv.hline(ax + 52, ax + 58, ay + 120, 0xffffff, 2);
   }
-  // side art box, widened to 140 (v5: 124) — text column tightened to pay for it
-  const abx = cx + cw - 140 - 10;
-  const aby = cy + 8;
-  const abw = 140;
-  const abh = ch - 16;
-  fillRect(abx, aby, abw, abh, [232, 228, 218]);
-  fillRect(abx, aby, abw, 2, INK);
-  fillRect(abx, aby + abh - 2, abw, 2, INK);
-  fillRect(abx, aby, 2, abh, INK);
-  fillRect(abx + abw - 2, aby, 2, abh, INK);
-  art(abx + 2, aby + 2, abw - 4, abh - 4);
 }
 
-function artSpace(bx: number, by: number, bw: number, bh: number): void {
-  fillRect(bx, by, bw, bh, [16, 24, 48]);
-  const stars: [number, number][] = [
-    [12, 10], [30, 26], [52, 8], [74, 20], [96, 12], [116, 28], [20, 44], [44, 56], [110, 48],
-  ];
-  for (const [sx, sy] of stars) fillRect(bx + sx, by + sy, 2, 2, [240, 235, 220]);
-  // Earth arc, fully inside the box (lesson from v4)
-  ellipse(bx + 18, by + bh - 8, 26, 18, [40, 90, 180]);
-  ellipse(bx + 12, by + bh - 14, 10, 7, [60, 140, 70]);
-  // rocket, vertical
-  poly(
-    [
-      [bx + 84, by + 12],
-      [bx + 94, by + 30],
-      [bx + 74, by + 30],
-    ],
-    RED,
-  );
-  fillRect(bx + 74, by + 30, 20, 44, [240, 235, 225]);
-  poly(
-    [
-      [bx + 74, by + 74],
-      [bx + 66, by + 88],
-      [bx + 74, by + 84],
-    ],
-    RED,
-  );
-  poly(
-    [
-      [bx + 94, by + 74],
-      [bx + 102, by + 88],
-      [bx + 94, by + 84],
-    ],
-    RED,
-  );
-  poly(
-    [
-      [bx + 79, by + 74],
-      [bx + 89, by + 74],
-      [bx + 84, by + 94],
-    ],
-    [240, 160, 50],
-  );
-  fillRect(bx + 78, by + 44, 12, 8, [40, 90, 180]);
+function drawCard(cv: Canvas, x: number, y: number, kicker: string, title: string, facts: string[], art: number): void {
+  cv.fillRect(x, y, 488, 140, CARD);
+  cv.outlineRect(x, y, 488, 140, INK, 2);
+  const ax = x + 338;
+  drawCardArt(cv, ax, y, 150, 140, art);
+  cv.outlineRect(ax, y, 150, 140, INK, 2);
+  drawText(cv, x + 12, y + 12, kicker, F5, 2, ACCENT, 2);
+  drawText(cv, x + 12, y + 30, title, F5, 3, INK, 3);
+  cv.fillRect(x + 12, y + 56, 40, 3, GOLD);
+  drawText(cv, x + 12, y + 64, facts[0], F5, 2, INK, 2);
+  drawText(cv, x + 12, y + 82, facts[1], F5, 2, INK, 2);
+  drawText(cv, x + 12, y + 100, facts[2], F5, 2, INK, 2);
 }
 
-function artBangladesh(bx: number, by: number, bw: number, bh: number): void {
-  fillRect(bx, by, bw, bh, [243, 233, 210]);
-  // "36" then "%" drawn apart with a clean 9 px gap (v5 fix kept)
-  drawText5('36', bx + 8, by + 10, 4, INK);
-  drawText5('%', bx + 65, by + 10, 4, INK);
-  // gold arrow climbing to the top right
-  line(bx + 96, by + 66, bx + 124, by + 26, GOLD, 4);
-  poly(
-    [
-      [bx + 128, by + 18],
-      [bx + 116, by + 22],
-      [bx + 126, by + 36],
-    ],
-    GOLD,
-  );
-  // factory silhouette along the bottom
-  fillRect(bx + 8, by + 78, 84, 30, [70, 66, 60]);
-  fillRect(bx + 14, by + 62, 9, 18, [70, 66, 60]);
-  fillRect(bx + 96, by + 88, 32, 20, [70, 66, 60]);
-  fillRect(bx + 18, by + 86, 8, 8, [240, 220, 140]);
-  fillRect(bx + 34, by + 86, 8, 8, [240, 220, 140]);
-  fillRect(bx + 50, by + 86, 8, 8, [240, 220, 140]);
-  fillRect(bx + 66, by + 86, 8, 8, [240, 220, 140]);
-}
-
-function artIndonesia(bx: number, by: number, bw: number, bh: number): void {
-  fillRect(bx, by, bw, bh, [220, 232, 216]);
-  // hills
-  poly(
-    [
-      [bx, by + 70],
-      [bx + 50, by + 34],
-      [bx + 100, by + 70],
-    ],
-    [90, 122, 74],
-  );
-  poly(
-    [
-      [bx + 60, by + 76],
-      [bx + 110, by + 44],
-      [bx + 136, by + 76],
-    ],
-    [122, 90, 58],
-  );
-  // mine shaft with flood water at the bottom
-  fillRect(bx + 58, by + 52, 18, 42, [30, 28, 24]);
-  fillRect(bx + 54, by + 88, 26, 14, [40, 90, 180]);
-  fillRect(bx + 52, by + 46, 30, 6, [60, 56, 50]);
-  // warning marker
-  poly(
-    [
-      [bx + 116, by + 58],
-      [bx + 126, by + 76],
-      [bx + 106, by + 76],
-    ],
-    GOLD,
-  );
-  fillRect(bx + 115, by + 64, 2, 7, INK);
-  fillRect(bx + 115, by + 73, 2, 2, INK);
-}
-
-function artEurope(bx: number, by: number, bw: number, bh: number): void {
-  fillRect(bx, by, bw, bh, [216, 221, 226]);
-  // smoke puffs
-  ellipse(bx + 34, by + 26, 10, 8, [150, 150, 148]);
-  ellipse(bx + 52, by + 18, 12, 9, [170, 170, 168]);
-  ellipse(bx + 74, by + 26, 9, 7, [150, 150, 148]);
-  // hangar
-  fillRect(bx + 12, by + 40, 96, 52, [120, 124, 128]);
-  ellipse(bx + 60, by + 92, 30, 26, [70, 72, 76]);
-  fillRect(bx + 44, by + 66, 32, 26, [50, 52, 56]);
-  // runway
-  fillRect(bx + 8, by + 96, 120, 6, [60, 60, 62]);
-  for (let x = 14; x < 120; x += 20) fillRect(bx + x, by + 98, 10, 2, [220, 220, 215]);
-  // two jets on the runway
-  poly(
-    [
-      [bx + 26, by + 92],
-      [bx + 46, by + 92],
-      [bx + 36, by + 84],
-    ],
-    [40, 42, 46],
-  );
-  poly(
-    [
-      [bx + 78, by + 92],
-      [bx + 98, by + 92],
-      [bx + 88, by + 84],
-    ],
-    [40, 42, 46],
-  );
-}
-
-// ---------------------------------------------------------------- page
-function build(): void {
-  // paper
-  fillRect(0, 0, W, H, PAPER);
+// ---------------- page ----------------
+function drawPage(): Canvas {
+  const cv = new Canvas(1024, 1024, PAPER);
+  cv.outlineRect(10, 10, 1004, 1004, INK, 2);
   // masthead
-  const mast = 'THE WORLD';
-  drawText8(mast, Math.floor((W - width8(mast, 6)) / 2), 16, 6, INK);
-  // dateline + tag
-  drawText5('WEDNESDAY, 25 NOVEMBER 2026', Math.floor((W - width5('WEDNESDAY, 25 NOVEMBER 2026', 2)) / 2), 96, 2, INK);
-  drawText5('IN ONE IMAGE', 1000 - width5('IN ONE IMAGE', 2), 96, 2, RED);
-  fillRect(24, 118, 976, 2, INK);
-  // lead headline (two lines, ink + red)
-  const h1 = 'HOSTAGES FREED';
-  const h2 = 'IN CARTAGENA';
-  drawText8(h1, Math.floor((W - width8(h1, 3)) / 2), 128, 3, INK);
-  drawText8(h2, Math.floor((W - width8(h2, 3)) / 2), 168, 3, RED);
+  drawTextCentered(cv, 512, 22, "THE WORLD", F12, 6, INK, 6);
+  drawTextCentered(cv, 512, 102, "WEDNESDAY, 25 NOVEMBER 2026", F5, 2, INK, 2);
+  drawText(cv, 866, 102, "IN ONE IMAGE", F5, 2, ACCENT, 2);
+  cv.hline(16, 1008, 122, INK, 2);
+  // lead headline + facts
+  drawTextCentered(cv, 512, 132, "HOSTAGES FREED IN CARTAGENA", F12, 3, INK, 3);
+  drawTextCentered(cv, 512, 176, "30 HOSTAGES FREED - 1 GUNMAN KILLED, 4 HELD", F5, 2, INK, 2);
+  drawTextCentered(cv, 512, 196, "SECURITY FORCES STORM EXITO SUPERMARKET AT DAWN", F5, 2, INK, 2);
+  cv.hline(16, 1008, 218, INK, 2);
   // lead scene
-  drawLeadScene();
-  // lead facts
-  drawText5('30 HOSTAGES FREED AT EXITO SUPERMARKET', 24, 528, 2, INK);
-  drawText5('1 GUNMAN KILLED, 4 HELD AFTER DAWN RAID', 24, 548, 2, INK);
-  // secondary cards, 2x2
-  drawCard(24, 580, 'SPACE', 'PAKISTAN', 'IN SPACE', ['SHENZHOU-24 DOCKS', 'AT TIANGONG', '1ST PAKISTANI ASTRONAUT'], artSpace);
-  drawCard(518, 580, 'BANGLADESH', 'WAGES UP', '36%', ['GARMENT PAY RISES', 'TO 17,000 TAKA', 'FROM DEC 1'], artBangladesh);
-  drawCard(24, 724, 'INDONESIA', 'PONGKOR', 'MINE FLOOD', ['9 DEAD, 17 TRAPPED', 'IN FLOODED GOLD MINE', 'SHAFT 100 M DEEP'], artIndonesia);
-  drawCard(518, 724, 'EUROPE', 'UKRAINE HITS', 'AIR BASE', ['5 JETS DAMAGED', '3 MIG-31, 2 SU-34', 'AT SAVASLEYKA BASE'], artEurope);
-  // briefs strip: dark band, light text, 22 px tall (tall stretch of the 5x7 font)
-  fillRect(0, 866, W, 158, BRIEF_BG);
+  drawScene(cv);
+  // secondary cards (2 x 2)
+  drawCard(cv, 16, 566, "SPACE - SHENZHOU-24", "SPACE", ["FIRST PAKISTANI ASTRONAUT", "REACHES TIANGONG STATION", "DOCKED IN 3.5 HOURS"], 0);
+  drawCard(cv, 520, 566, "ECONOMY - WAGES", "BANGLADESH", ["GARMENT PAY UP 36% TO", "17,000 TAKA FROM DEC 1", "WAGE BOARD VOTE 4-2"], 1);
+  drawCard(cv, 16, 716, "DISASTER - PONGKOR", "INDONESIA", ["17 MINERS STILL TRAPPED", "9 DEAD, FLOODED GOLD SHAFT", "SHAFT 100 M DEEP"], 2);
+  drawCard(cv, 520, 716, "WAR - SAVASLEYKA", "EUROPE", ["UKRAINE HITS RUSSIAN BASE", "5 JETS DAMAGED", "3 MIG-31, 2 SU-34"], 3);
+  // briefs band (dark): 6 lines, 23 px, step 25, thin separators
+  cv.fillRect(16, 864, 992, 150, BAND);
   const briefs = [
-    'SAUDI-LED STRIKES HIT HODEIDAH; JEDDAH THREATENED',
-    'SOLOMON PACT WITH AUSTRALIA; NO FOREIGN BASES',
-    'NVIDIA SLIDES 8.3% AS HUANG RALLY FADES',
-    'BEIJING PROBES SHANGHAI PARTY CHIEF',
-    'CESSNA CRASH IN GULF KILLS SIX',
-    'HUAWEI GUILTY ON 10 OF 12 COUNTS',
+    "HODEIDAH: SAUDI-LED STRIKES HIT YEMEN PORT",
+    "SOLOMON ISLANDS SIGNS SECURITY PACT WITH AUSTRALIA",
+    "NVIDIA -8.3% AS HUANG RALLY FADES",
+    "CHINA PROBES SHANGHAI PARTY CHIEF CHEN JINING",
+    "CESSNA CRASH OFF MISSISSIPPI: 6 DEAD",
+    "HUAWEI GUILTY ON 10 OF 12 US CHARGES",
   ];
+  const rowExtra = [0, 3];
   for (let i = 0; i < briefs.length; i++) {
-    const top = 874 + i * 25;
-    fillRect(24, top + 8, 6, 6, GOLD);
-    drawText5(briefs[i], 38, top, 3, BRIEF_TX, 1, true);
+    const y = 865 + i * 25;
+    drawText(cv, 32, y, briefs[i], F5, 3, BRIEF, 3, rowExtra);
+    if (i < 5) cv.hline(32, 992, y + 24, SEPARATOR, 1);
   }
+  return cv;
 }
 
+// ---------------- main ----------------
 function main(): void {
-  build();
-  const png = encodePNG(W, H, img);
-  const out = process.env.MAKEFUN_OUTPUT_DIR || '/output';
-  mkdirSync(out, { recursive: true });
-  writeFileSync(out + '/entry.png', png);
-  const sha = createHash('sha256').update(png).digest('hex');
+  const outDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
+  fs.mkdirSync(outDir, { recursive: true });
+  const cv = drawPage();
+  const png = encodePNG(1024, 1024, cv.buf);
+  const sha = crypto.createHash("sha256").update(png).digest("hex");
+  fs.writeFileSync(path.join(outDir, "entry.png"), png);
   const dossier = {
-    title: 'THE WORLD',
-    date: '2026-11-25',
-    version: 6,
-    width: W,
-    height: H,
+    bounty: "news-image-20261125",
+    title: "THE WORLD",
+    date: "2026-11-25",
+    version: 7,
+    width: 1024,
+    height: 1024,
     entry_png_sha256: sha,
-    stories: 11,
+    entry_png_bytes: png.length,
   };
-  writeFileSync(out + '/dossier.json', JSON.stringify(dossier, null, 2) + '\n');
+  fs.writeFileSync(path.join(outDir, "dossier.json"), JSON.stringify(dossier, null, 2) + "\n");
+  console.log(`entry.png ${png.length} bytes sha256 ${sha}`);
 }
 
 main();
